@@ -9,12 +9,12 @@ import (
 func TestDirectoryWatcher(t *testing.T) {
 
 	Convey("Test create new watcher", t, func() {
-		watcher := NewWatcher()
+		watcher := NewWatcher("root", "drop")
 		So(watcher, ShouldNotBeNil)
 	})
 
 	Convey("Test simple watcher watch", t, func() {
-		watcher := NewWatcher()
+		watcher := NewWatcher("root", "drop")
 		watcher.Watch(".")
 		watcher.Close()
 	})

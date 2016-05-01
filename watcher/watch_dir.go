@@ -5,15 +5,19 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 type Watcher interface {
-	Watch(root string)
+	Watch()
 	Close() error
 }
 
 type SimpleWatcher struct {
+	root        string
+	dropOff     string
 	watcher     *fsnotify.Watcher
 	WatchedDirs map[string]bool
 	ActiveFiles map[string]string
@@ -25,31 +29,33 @@ type SimpleWatcher struct {
 	Files       chan string
 }
 
-func NewWatcher() Watcher {
+func NewWatcher(root string, dropOff string) Watcher {
 	return &SimpleWatcher{
+		root:        root,
+		dropOff:     dropOff,
 		EventsDone:  make(chan bool),
 		WatcherDone: make(chan bool),
 		Adds:        make(chan string, 10),
 		Removes:     make(chan string, 10),
 		Files:       make(chan string, 10),
+		WatchedDirs: make(map[string]bool, 0),
+		ActiveFiles: make(map[string]string, 0),
 	}
 }
 
-func (w *SimpleWatcher) Watch(root string) {
-	log.Println("Watcher being started in ", root)
-	w.WatchedDirs = make(map[string]bool, 0)
+func (w *SimpleWatcher) Watch() {
+	log.Println("Watcher being started in ", w.root)
 
 	newWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer newWatcher.Close()
 
 	w.watcher = newWatcher
 
 	log.Println("Scanning file system")
 
-	startingDirs, err := determineStartDirs(root)
+	startingDirs, err := determineStartDirs(w.root)
 	if err != nil {
 		log.Fatal("Unable to read root dir: ", err)
 		return
@@ -66,6 +72,10 @@ func (w *SimpleWatcher) Watch(root string) {
 		w.WatchedDirs[dir] = true
 	}
 
+	if err != nil {
+		log.Fatal("Failed to add root dir: ", err)
+	}
+
 	log.Println("Directories added. Starting watcher")
 
 	go w.handleEvents()
@@ -76,6 +86,7 @@ func (w *SimpleWatcher) Watch(root string) {
 }
 
 func (w *SimpleWatcher) Close() error {
+	w.watcher.Close()
 	w.EventsDone <- true
 	w.WatcherDone <- true
 	return nil
@@ -109,7 +120,7 @@ func buildDirs(dirChan chan<- string) filepath.WalkFunc {
 	return func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Print(err)
-			return nil
+			return err
 		}
 		if info.IsDir() {
 			dirChan <- path
@@ -149,6 +160,9 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 		case event := <-eventIn:
 			log.Println("event:", event)
 			if event.Op&fsnotify.Create == fsnotify.Create {
+				if isNewFile(event.Name) {
+					continue
+				}
 				stat, err := os.Stat(event.Name)
 				if err != nil {
 					log.Println("Error stat'ing ", event.Name, ": ", err)
@@ -164,11 +178,15 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 				}
 			}
 
-			//if event.Op & fsnotify.Rename == fsnotify.Rename {
-			//	// validate existence of all of our directories?
-			//	// TODO: clean up the watcher pointed at the old name
-			//
-			//}
+			if event.Op&fsnotify.Rename == fsnotify.Rename {
+				if isNewFile(event.Name) {
+					continue
+				}
+				if _, err := os.Stat("/path/to/whatever"); os.IsNotExist(err) {
+					log.Println("Directory no longer exists: ", event.Name)
+					removes <- event.Name
+				}
+			}
 			//
 			//if event.Op & fsnotify.Write == fsnotify.Write {
 			//	log.Println("modified file:", event.Name)
@@ -179,13 +197,22 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 	}
 }
 
+func isNewFile(name string) bool {
+	fileBaseName := strings.ToLower(filepath.Base(name))
+	log.Println(fileBaseName)
+	return strings.HasPrefix(fileBaseName, "new ")
+}
+
 func (w *SimpleWatcher) handleFilesFound() {
 	for {
 		select {
 		case file := <-w.Files:
 			// save path
 			// move file to deluge drop point
-			w.ActiveFiles[file] = file
+			base := filepath.Base(file)
+			w.ActiveFiles[base] = file
+			os.Rename(file, path.Join(w.dropOff, base))
+			log.Println(w.ActiveFiles)
 		case <-w.FilesDone:
 			return
 		}
