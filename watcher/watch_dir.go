@@ -158,7 +158,7 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 	for {
 		select {
 		case event := <-eventIn:
-			log.Println("event:", event)
+			log.Println("\tevent:", event)
 			if event.Op&fsnotify.Create == fsnotify.Create {
 				if isNewFile(event.Name) {
 					continue
@@ -177,20 +177,6 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 					files <- event.Name
 				}
 			}
-
-			if event.Op&fsnotify.Rename == fsnotify.Rename {
-				if isNewFile(event.Name) {
-					continue
-				}
-				if _, err := os.Stat("/path/to/whatever"); os.IsNotExist(err) {
-					log.Println("Directory no longer exists: ", event.Name)
-					removes <- event.Name
-				}
-			}
-			//
-			//if event.Op & fsnotify.Write == fsnotify.Write {
-			//	log.Println("modified file:", event.Name)
-			//}
 		case <-done:
 			return
 		}
