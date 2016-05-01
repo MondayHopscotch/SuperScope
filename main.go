@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 	"github.com/MondayHopscotch/SuperScope/watcher"
-	"syscall"
 	"github.com/vrecan/death"
+	"syscall"
 )
 
 func main() {

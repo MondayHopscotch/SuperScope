@@ -1,10 +1,10 @@
 package watcher
 
 import (
-	"log"
-	"github.com/fsnotify/fsnotify"
-	"os"
 	"fmt"
+	"github.com/fsnotify/fsnotify"
+	"log"
+	"os"
 	"path/filepath"
 )
 
@@ -13,24 +13,23 @@ type Watcher interface {
 	Close() error
 }
 
-
 type SimpleWatcher struct {
 	watcher     *fsnotify.Watcher
 	WatchedDirs map[string]bool
-	EventsDone chan bool
+	EventsDone  chan bool
 	WatcherDone chan bool
-	Adds chan string
-	Removes chan string
-	Files chan string
+	Adds        chan string
+	Removes     chan string
+	Files       chan string
 }
 
 func NewWatcher() Watcher {
 	return &SimpleWatcher{
-		EventsDone: make(chan bool),
+		EventsDone:  make(chan bool),
 		WatcherDone: make(chan bool),
-		Adds: make(chan string, 10),
-		Removes: make(chan string, 10),
-		Files: make(chan string, 10),
+		Adds:        make(chan string, 10),
+		Removes:     make(chan string, 10),
+		Files:       make(chan string, 10),
 	}
 }
 
@@ -94,7 +93,7 @@ func determineStartDirs(root string) ([]string, error) {
 	}()
 
 	filepath.Walk(root, buildDirs(dirChan))
-	done<- true
+	done <- true
 
 	log.Println(fmt.Sprint("%v+", dirs))
 
@@ -108,7 +107,7 @@ func buildDirs(dirChan chan<- string) filepath.WalkFunc {
 			return nil
 		}
 		if info.IsDir() {
-			dirChan<- path
+			dirChan <- path
 		}
 		return nil
 	}
@@ -144,7 +143,7 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 		select {
 		case event := <-eventIn:
 			log.Println("event:", event)
-			if event.Op & fsnotify.Create == fsnotify.Create {
+			if event.Op&fsnotify.Create == fsnotify.Create {
 				stat, err := os.Stat(event.Name)
 				if err != nil {
 					log.Println("Error stat'ing ", event.Name, ": ", err)

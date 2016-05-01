@@ -1,9 +1,9 @@
 package watcher
 
 import (
-	"testing"
-	. "github.com/smartystreets/goconvey/convey"
 	"github.com/fsnotify/fsnotify"
+	. "github.com/smartystreets/goconvey/convey"
+	"testing"
 )
 
 func TestDirectoryWatcher(t *testing.T) {
@@ -28,9 +28,9 @@ func TestDirectoryWatcher(t *testing.T) {
 
 		go handleEventsForChans(done, eventIn, adds, removes, files)
 
-		createDirEvent :=  fsnotify.Event{Name: "../watcher", Op: fsnotify.Create}
+		createDirEvent := fsnotify.Event{Name: "../watcher", Op: fsnotify.Create}
 
-		eventIn<- createDirEvent
+		eventIn <- createDirEvent
 
 		add := <-adds
 
@@ -38,13 +38,13 @@ func TestDirectoryWatcher(t *testing.T) {
 
 		createFileEvent := fsnotify.Event{Name: "watch_dir_test.go", Op: fsnotify.Create}
 
-		eventIn<- createFileEvent
+		eventIn <- createFileEvent
 
 		file := <-files
 
 		So(file, ShouldEqual, "watch_dir_test.go")
 
-		done<- true
+		done <- true
 	})
 
 	Convey("Test Build dirs", t, func() {
