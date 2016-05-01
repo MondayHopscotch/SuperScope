@@ -4,30 +4,38 @@ import (
 	"log"
 	"github.com/fsnotify/fsnotify"
 	"os"
-	"github.com/vrecan/death"
-	"syscall"
-	"io/ioutil"
-	"errors"
 	"fmt"
 	"path/filepath"
 )
 
 type Watcher interface {
 	Watch(root string)
+	Close() error
 }
 
 
 type SimpleWatcher struct {
 	watcher     *fsnotify.Watcher
-	watchedDirs map[string]bool
+	WatchedDirs map[string]bool
+	EventsDone chan bool
+	WatcherDone chan bool
+	Adds chan string
+	Removes chan string
+	Files chan string
 }
 
 func NewWatcher() Watcher {
-	return &SimpleWatcher{}
+	return &SimpleWatcher{
+		EventsDone: make(chan bool),
+		WatcherDone: make(chan bool),
+		Adds: make(chan string, 10),
+		Removes: make(chan string, 10),
+		Files: make(chan string, 10),
+	}
 }
 
 func (w *SimpleWatcher) Watch(root string) {
-	w.watchedDirs = make(map[string]bool, 0)
+	w.WatchedDirs = make(map[string]bool, 0)
 
 	newWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -53,39 +61,20 @@ func (w *SimpleWatcher) Watch(root string) {
 		if err != nil {
 			log.Fatal("Failed to add root dir: ", err)
 		}
-		w.watchedDirs[dir] = true
+		w.WatchedDirs[dir] = true
 	}
 
 	log.Println("Directories added. Starting watcher")
 
-	done := make(chan bool)
-	adds := make(chan string, 10)
-	removes := make(chan string, 10)
+	go w.handleEvents()
 
-	go handleEvents(done, w.watcher.Events, adds, removes)
+	go w.handleFSWatcher()
+}
 
-	go func() {
-		for {
-			select {
-			case newWatch := <-adds:
-				err := w.watcher.Add(newWatch)
-				if err != nil {
-					log.Println("Error adding watch dir ", newWatch, err)
-					continue
-				}
-			case oldWatch := <-removes:
-				err := w.watcher.Remove(oldWatch)
-				if err != nil {
-					log.Println("Error removing watch dir ", oldWatch, err)
-					continue
-				}
-			}
-		}
-	}()
-
-	death := death.NewDeath(syscall.SIGINT, syscall.SIGTERM)
-	death.WaitForDeath()
-	done<- true
+func (w *SimpleWatcher) Close() error {
+	w.EventsDone <- true
+	w.WatcherDone <- true
+	return nil
 }
 
 func determineStartDirs(root string) ([]string, error) {
@@ -125,11 +114,36 @@ func buildDirs(dirChan chan<- string) filepath.WalkFunc {
 	}
 }
 
-func handleEvents(done chan bool, eventIn <-chan fsnotify.Event, adds chan<- string, removes chan<- string) {
+func (w *SimpleWatcher) handleFSWatcher() {
+	for {
+		select {
+		case newWatch := <-w.Adds:
+			err := w.watcher.Add(newWatch)
+			if err != nil {
+				log.Println("Error adding watch dir ", newWatch, err)
+				continue
+			}
+		case oldWatch := <-w.Removes:
+			err := w.watcher.Remove(oldWatch)
+			if err != nil {
+				log.Println("Error removing watch dir ", oldWatch, err)
+				continue
+			}
+		case <-w.WatcherDone:
+			return
+		}
+	}
+}
+
+func (w *SimpleWatcher) handleEvents() {
+	handleEventsForChans(w.EventsDone, w.watcher.Events, w.Adds, w.Removes, w.Files)
+}
+
+func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds chan<- string, removes chan<- string, files chan<- string) {
 	for {
 		select {
 		case event := <-eventIn:
-			//log.Println("event:", event)
+			log.Println("event:", event)
 			if event.Op & fsnotify.Create == fsnotify.Create {
 				stat, err := os.Stat(event.Name)
 				if err != nil {
@@ -142,6 +156,7 @@ func handleEvents(done chan bool, eventIn <-chan fsnotify.Event, adds chan<- str
 					adds <- event.Name
 				} else {
 					log.Println("New file for consumption ", event.Name)
+					files <- event.Name
 				}
 			}
 
