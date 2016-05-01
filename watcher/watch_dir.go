@@ -16,8 +16,10 @@ type Watcher interface {
 type SimpleWatcher struct {
 	watcher     *fsnotify.Watcher
 	WatchedDirs map[string]bool
+	ActiveFiles map[string]string
 	EventsDone  chan bool
 	WatcherDone chan bool
+	FilesDone   chan bool
 	Adds        chan string
 	Removes     chan string
 	Files       chan string
@@ -34,6 +36,7 @@ func NewWatcher() Watcher {
 }
 
 func (w *SimpleWatcher) Watch(root string) {
+	log.Println("Watcher being started in ", root)
 	w.WatchedDirs = make(map[string]bool, 0)
 
 	newWatcher, err := fsnotify.NewWatcher()
@@ -68,6 +71,8 @@ func (w *SimpleWatcher) Watch(root string) {
 	go w.handleEvents()
 
 	go w.handleFSWatcher()
+
+	go w.handleFilesFound()
 }
 
 func (w *SimpleWatcher) Close() error {
@@ -169,6 +174,19 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 			//	log.Println("modified file:", event.Name)
 			//}
 		case <-done:
+			return
+		}
+	}
+}
+
+func (w *SimpleWatcher) handleFilesFound() {
+	for {
+		select {
+		case file := <-w.Files:
+			// save path
+			// move file to deluge drop point
+			w.ActiveFiles[file] = file
+		case <-w.FilesDone:
 			return
 		}
 	}
