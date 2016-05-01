@@ -30,6 +30,10 @@ type SimpleWatcher struct {
 }
 
 func NewWatcher(root string, dropOff string) Watcher {
+	return NewSimpleWatcher(root, dropOff)
+}
+
+func NewSimpleWatcher(root string, dropOff string) *SimpleWatcher {
 	return &SimpleWatcher{
 		root:        root,
 		dropOff:     dropOff,
@@ -173,8 +177,12 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 					log.Println("Need new watcher for ", event.Name)
 					adds <- event.Name
 				} else {
-					log.Println("New file for consumption ", event.Name)
-					files <- event.Name
+					ext := strings.ToLower(path.Ext(event.Name))
+					log.Println("extension: ", ext)
+					if strings.Compare(ext, ".torrent") == 0 {
+						log.Println("New file for consumption ", event.Name)
+						files <- event.Name
+					}
 				}
 			}
 		case <-done:

@@ -1,1 +1,7 @@
 .idea/
+
+#test files
+watcher/test/
+
+#executable
+SuperScope*
