@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type Watcher interface {
@@ -115,7 +116,7 @@ func determineStartDirs(root string) ([]string, error) {
 	filepath.Walk(root, buildDirs(dirChan))
 	done <- true
 
-	log.Println(fmt.Sprint("%v+", dirs))
+	log.Println(fmt.Sprintf("%v", dirs))
 
 	return dirs, nil
 }
@@ -134,6 +135,7 @@ func buildDirs(dirChan chan<- string) filepath.WalkFunc {
 }
 
 func (w *SimpleWatcher) handleFSWatcher() {
+	log.Println("Watcher builder starting up")
 	for {
 		select {
 		case newWatch := <-w.Adds:
@@ -159,6 +161,7 @@ func (w *SimpleWatcher) handleEvents() {
 }
 
 func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds chan<- string, removes chan<- string, files chan<- string) {
+	log.Println("Event handler starting up")
 	for {
 		select {
 		case event := <-eventIn:
@@ -198,17 +201,32 @@ func isNewFile(name string) bool {
 }
 
 func (w *SimpleWatcher) handleFilesFound() {
+	log.Println("File consumer starting up")
 	for {
 		select {
 		case file := <-w.Files:
-			// save path
-			// move file to deluge drop point
-			base := filepath.Base(file)
-			w.ActiveFiles[base] = file
-			os.Rename(file, path.Join(w.dropOff, base))
-			log.Println(w.ActiveFiles)
+			go w.consumeFileWithTimeout(file, time.Minute*30)
 		case <-w.FilesDone:
 			return
 		}
 	}
+}
+
+func (w *SimpleWatcher) consumeFileWithTimeout(file string, timeout time.Duration) {
+	start := time.Now()
+	base := filepath.Base(file)
+	log.Println("Consuming file: ", base)
+	for time.Since(start) < timeout {
+		err := os.Rename(file, path.Join(w.dropOff, base))
+		if err != nil {
+			log.Println("Failed to move file: ", base, ": ", err)
+			time.Sleep(time.Second * 5)
+			continue
+		} else {
+			w.ActiveFiles[base] = file
+			log.Println("Finished consuming: ", base)
+			return
+		}
+	}
+	log.Println("Failed to consume file before imeout reached for: ", file)
 }

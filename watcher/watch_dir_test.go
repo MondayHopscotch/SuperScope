@@ -62,6 +62,22 @@ func TestDirectoryWatcher(t *testing.T) {
 		t.Log(dirs)
 		So(len(dirs), ShouldEqual, 4) // the base directory, plus our test
 	})
+
+	Convey("Test file found", t, func() {
+		resetTestDir()
+		watcher := NewSimpleWatcher("test/watch", "test/drop")
+
+		go watcher.handleFilesFound()
+
+		testFile := "test/watch/movies/test.torrent"
+		_, err := os.Create(testFile)
+		So(err, ShouldBeNil)
+
+		watcher.Files <- testFile
+
+		_, err = os.Stat("test/drop/test.torrent")
+		So(err, ShouldNotBeNil)
+	})
 }
 
 func resetTestDir() {
