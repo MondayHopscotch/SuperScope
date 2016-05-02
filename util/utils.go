@@ -3,6 +3,7 @@ package util
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -29,4 +30,9 @@ func MoveFileWithTimeout(src string, dest string, timeout time.Duration) error {
 		}
 	}
 	return err
+}
+
+func RemoveExtension(fileName string) string {
+	extLength := len(filepath.Ext(fileName))
+	return fileName[0 : len(fileName)-extLength]
 }

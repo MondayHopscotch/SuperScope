@@ -222,6 +222,8 @@ func (w *SimpleWatcher) handleFilesFound() {
 }
 
 func (w *SimpleWatcher) consumeFileWithTimeout(file string, timeout time.Duration) {
+	backSlash := regexp.MustCompile("\\\\")
+	file = backSlash.ReplaceAllString(file, "/")
 	base := filepath.Base(file)
 	log.Println("Consuming file: ", base)
 	err := util.MoveFileWithTimeout(file, path.Join(w.dropOffDir, base), timeout)
@@ -272,8 +274,8 @@ func (w *SimpleWatcher) watchForCompletion() {
 	}
 }
 
-func (w *SimpleWatcher) finalizeFile(activeFile string, origin string, compFile string) {
-	compFileWithPath := path.Join(w.completedDir, compFile)
+func (w *SimpleWatcher) finalizeFile(activeFile string, origin string, compFileName string) {
+	compFileWithPath := path.Join(w.completedDir, compFileName)
 
 	// here we need to check if it's a directory and do things appropriately (if it's a dir, then we find the file we care about
 	stat, err := os.Stat(compFileWithPath)
@@ -306,20 +308,23 @@ func (w *SimpleWatcher) finalizeFile(activeFile string, origin string, compFile 
 					largestFile = fileInfo
 				}
 			}
+			originalFileName := path.Base(origin)
+			compFileName = util.RemoveExtension(originalFileName) + path.Ext(largestFile.Name())
+			log.Println("File to move: ", compFileName)
 			compFileWithPath = path.Join(compFileWithPath, largestFile.Name())
 		} else {
 			log.Println("Completed file of unknown category")
 		}
 	}
-	err = util.MoveFileWithTimeout(compFileWithPath, path.Join(finalRestingPlace, compFile), time.Minute*5)
+	err = util.MoveFileWithTimeout(compFileWithPath, path.Join(finalRestingPlace, compFileName), time.Minute*5)
 	if err != nil {
-		log.Println("Failed to move completed file: ", compFile, ": ", err)
+		log.Println("Failed to move completed file: ", compFileName, ": ", err)
 	}
 }
 
 func (w *SimpleWatcher) determineFinalLocation(origin string) string {
 	// take origin path, replace 'root' prefix with 'media' prefix
 	rootLength := len(w.rootDir)
-	extLength := len(filepath.Base(origin))
-	return w.mediaDir + origin[rootLength:len(origin)-extLength]
+	baseLength := len(filepath.Base(origin))
+	return w.mediaDir + origin[rootLength:len(origin)-baseLength]
 }
