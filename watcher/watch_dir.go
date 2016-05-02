@@ -2,11 +2,14 @@ package watcher
 
 import (
 	"fmt"
+	"github.com/MondayHopscotch/SuperScope/util"
 	"github.com/fsnotify/fsnotify"
+	"io/ioutil"
 	"log"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -17,39 +20,43 @@ type Watcher interface {
 }
 
 type SimpleWatcher struct {
-	root        string
-	dropOff     string
-	watcher     *fsnotify.Watcher
-	WatchedDirs map[string]bool
-	ActiveFiles map[string]string
-	EventsDone  chan bool
-	WatcherDone chan bool
-	FilesDone   chan bool
-	Adds        chan string
-	Removes     chan string
-	Files       chan string
+	rootDir      string
+	dropOffDir   string
+	completedDir string
+	mediaDir     string
+	watcher      *fsnotify.Watcher
+	WatchedDirs  map[string]bool
+	ActiveFiles  map[string]string
+	EventsDone   chan bool
+	WatcherDone  chan bool
+	FilesDone    chan bool
+	Adds         chan string
+	Removes      chan string
+	Files        chan string
 }
 
-func NewWatcher(root string, dropOff string) Watcher {
-	return NewSimpleWatcher(root, dropOff)
+func NewWatcher(root string, dropOff string, completed string, media string) Watcher {
+	return NewSimpleWatcher(root, dropOff, completed, media)
 }
 
-func NewSimpleWatcher(root string, dropOff string) *SimpleWatcher {
+func NewSimpleWatcher(root string, dropOff string, completed string, media string) *SimpleWatcher {
 	return &SimpleWatcher{
-		root:        root,
-		dropOff:     dropOff,
-		EventsDone:  make(chan bool),
-		WatcherDone: make(chan bool),
-		Adds:        make(chan string, 10),
-		Removes:     make(chan string, 10),
-		Files:       make(chan string, 10),
-		WatchedDirs: make(map[string]bool, 0),
-		ActiveFiles: make(map[string]string, 0),
+		rootDir:      root,
+		dropOffDir:   dropOff,
+		completedDir: completed,
+		mediaDir:     media,
+		EventsDone:   make(chan bool),
+		WatcherDone:  make(chan bool),
+		Adds:         make(chan string, 10),
+		Removes:      make(chan string, 10),
+		Files:        make(chan string, 10),
+		WatchedDirs:  make(map[string]bool, 0),
+		ActiveFiles:  make(map[string]string, 0),
 	}
 }
 
 func (w *SimpleWatcher) Watch() {
-	log.Println("Watcher being started in ", w.root)
+	log.Println("Watcher being started in ", w.rootDir)
 
 	newWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -60,7 +67,7 @@ func (w *SimpleWatcher) Watch() {
 
 	log.Println("Scanning file system")
 
-	startingDirs, err := determineStartDirs(w.root)
+	startingDirs, err := determineStartDirs(w.rootDir)
 	if err != nil {
 		log.Fatal("Unable to read root dir: ", err)
 		return
@@ -88,6 +95,8 @@ func (w *SimpleWatcher) Watch() {
 	go w.handleFSWatcher()
 
 	go w.handleFilesFound()
+
+	go w.watchForCompletion()
 }
 
 func (w *SimpleWatcher) Close() error {
@@ -213,20 +222,104 @@ func (w *SimpleWatcher) handleFilesFound() {
 }
 
 func (w *SimpleWatcher) consumeFileWithTimeout(file string, timeout time.Duration) {
-	start := time.Now()
 	base := filepath.Base(file)
 	log.Println("Consuming file: ", base)
-	for time.Since(start) < timeout {
-		err := os.Rename(file, path.Join(w.dropOff, base))
+	err := util.MoveFileWithTimeout(file, path.Join(w.dropOffDir, base), timeout)
+	if err != nil {
+		log.Println("Failed to consume file before timeout reached for: ", file)
+	} else {
+		w.ActiveFiles[base] = file
+		log.Println("Finished consuming: ", base)
+	}
+}
+
+func (w *SimpleWatcher) watchForCompletion() {
+	log.Println("Completion watcher starting up")
+	nonAlphaNum := regexp.MustCompile("[^a-zA-Z0-9]")
+	for {
+		time.Sleep(5 * time.Second)
+		completedFiles, err := ioutil.ReadDir(w.completedDir)
 		if err != nil {
-			log.Println("Failed to move file: ", base, ": ", err)
-			time.Sleep(time.Second * 5)
+			log.Println("Unable to read completedDir: ", err)
 			continue
-		} else {
-			w.ActiveFiles[base] = file
-			log.Println("Finished consuming: ", base)
-			return
+		}
+		pendingRemoves := make([]string, 0)
+		for activeFile, fullPath := range w.ActiveFiles {
+			withoutExt := activeFile[0 : len(activeFile)-len(filepath.Ext(activeFile))]
+			fileTokens := nonAlphaNum.Split(strings.ToLower(withoutExt), -1)
+			log.Println("File Tokens (", len(fileTokens), ": ", fileTokens)
+			for _, compFile := range completedFiles {
+				matches := true
+				compTokens := nonAlphaNum.Split(strings.ToLower(compFile.Name()), -1)
+				log.Println("Compare Tokens: ", compTokens)
+				for _, fToken := range fileTokens {
+					if !util.StringSliceContains(compTokens, fToken) {
+						matches = false
+						break
+					}
+				}
+				if matches {
+					log.Println("Found completed match for ", activeFile, ": ", compFile.Name())
+					pendingRemoves = append(pendingRemoves, activeFile)
+					go w.finalizeFile(activeFile, fullPath, compFile.Name())
+					break
+				}
+			}
+		}
+		for _, remove := range pendingRemoves {
+			delete(w.ActiveFiles, remove)
 		}
 	}
-	log.Println("Failed to consume file before imeout reached for: ", file)
+}
+
+func (w *SimpleWatcher) finalizeFile(activeFile string, origin string, compFile string) {
+	compFileWithPath := path.Join(w.completedDir, compFile)
+
+	// here we need to check if it's a directory and do things appropriately (if it's a dir, then we find the file we care about
+	stat, err := os.Stat(compFileWithPath)
+	if err != nil {
+		log.Println("Error stat'ing ", compFileWithPath, ": ", err)
+	}
+
+	finalRestingPlace := w.determineFinalLocation(origin)
+	log.Println("Ensure directory exists: ", finalRestingPlace)
+	err = os.MkdirAll(finalRestingPlace, os.ModePerm)
+	if err != nil {
+		log.Println("Failed to create parent directories for ", finalRestingPlace, ": ", err)
+		return
+	}
+
+	if stat.IsDir() {
+		if strings.Contains(strings.ToLower(origin), "tv") {
+			// move the whole folder?
+			log.Println("Completed file is TV")
+		} else if strings.Contains(strings.ToLower(origin), "movies") {
+			// move the largest file
+			log.Println("Completed file is Movies")
+			allFiles, err := ioutil.ReadDir(compFileWithPath)
+			if err != nil {
+				log.Println("Unable to read completed file directory ", compFileWithPath, ": ", err)
+			}
+			var largestFile os.FileInfo
+			for _, fileInfo := range allFiles {
+				if largestFile == nil || fileInfo.Size() > largestFile.Size() {
+					largestFile = fileInfo
+				}
+			}
+			compFileWithPath = path.Join(compFileWithPath, largestFile.Name())
+		} else {
+			log.Println("Completed file of unknown category")
+		}
+	}
+	err = util.MoveFileWithTimeout(compFileWithPath, path.Join(finalRestingPlace, compFile), time.Minute*5)
+	if err != nil {
+		log.Println("Failed to move completed file: ", compFile, ": ", err)
+	}
+}
+
+func (w *SimpleWatcher) determineFinalLocation(origin string) string {
+	// take origin path, replace 'root' prefix with 'media' prefix
+	rootLength := len(w.rootDir)
+	extLength := len(filepath.Base(origin))
+	return w.mediaDir + origin[rootLength:len(origin)-extLength]
 }
