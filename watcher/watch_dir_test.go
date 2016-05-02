@@ -10,13 +10,13 @@ import (
 func TestDirectoryWatcher(t *testing.T) {
 
 	Convey("Test create new watcher", t, func() {
-		watcher := NewWatcher("root", "drop")
+		watcher := NewWatcher("root", "drop", "complete", "media")
 		So(watcher, ShouldNotBeNil)
 	})
 
 	Convey("Test simple watcher watch", t, func() {
 		resetTestDir()
-		watcher := NewSimpleWatcher("test/watch", "test/drop")
+		watcher := NewSimpleWatcher("test/watch", "test/drop", "test/complete", "test/media")
 		watcher.Watch()
 		watcher.Close()
 
@@ -65,7 +65,7 @@ func TestDirectoryWatcher(t *testing.T) {
 
 	Convey("Test file found", t, func() {
 		resetTestDir()
-		watcher := NewSimpleWatcher("test/watch", "test/drop")
+		watcher := NewSimpleWatcher("test/watch", "test/drop", "test/complete", "test/media")
 
 		go watcher.handleFilesFound()
 
