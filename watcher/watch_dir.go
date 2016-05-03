@@ -27,12 +27,23 @@ type SimpleWatcher struct {
 	watcher      *fsnotify.Watcher
 	WatchedDirs  map[string]bool
 	ActiveFiles  map[string]string
-	EventsDone   chan bool
-	WatcherDone  chan bool
-	FilesDone    chan bool
-	Adds         chan string
-	Removes      chan string
-	Files        chan string
+
+	EventsDone          chan bool
+	WatcherDone         chan bool
+	FinalizerDone       chan bool
+	FilesDone           chan bool
+	CompleteWatcherDone chan bool
+
+	Adds      chan string
+	Removes   chan string
+	Files     chan string
+	DoneFiles chan Finalizer
+}
+
+type Finalizer struct {
+	orig     string
+	origPath string
+	outFile  string
 }
 
 func NewWatcher(root string, dropOff string, completed string, media string) Watcher {
@@ -45,13 +56,19 @@ func NewSimpleWatcher(root string, dropOff string, completed string, media strin
 		dropOffDir:   dropOff,
 		completedDir: completed,
 		mediaDir:     media,
-		EventsDone:   make(chan bool),
-		WatcherDone:  make(chan bool),
-		Adds:         make(chan string, 10),
-		Removes:      make(chan string, 10),
-		Files:        make(chan string, 10),
-		WatchedDirs:  make(map[string]bool, 0),
-		ActiveFiles:  make(map[string]string, 0),
+
+		EventsDone:          make(chan bool),
+		WatcherDone:         make(chan bool),
+		FinalizerDone:       make(chan bool),
+		FilesDone:           make(chan bool),
+		CompleteWatcherDone: make(chan bool),
+		Adds:                make(chan string, 10),
+		Removes:             make(chan string, 10),
+		Files:               make(chan string, 10),
+		DoneFiles:           make(chan Finalizer, 0),
+
+		WatchedDirs: make(map[string]bool, 0),
+		ActiveFiles: make(map[string]string, 0),
 	}
 }
 
@@ -96,13 +113,18 @@ func (w *SimpleWatcher) Watch() {
 
 	go w.handleFilesFound()
 
-	go w.watchForCompletion()
+	go w.WatchForCompletion()
+
+	go w.ProcessCompletions()
 }
 
 func (w *SimpleWatcher) Close() error {
 	w.watcher.Close()
 	w.EventsDone <- true
 	w.WatcherDone <- true
+	w.FinalizerDone <- true
+	w.FilesDone <- true
+	w.CompleteWatcherDone <- true
 	return nil
 }
 
@@ -123,6 +145,9 @@ func determineStartDirs(root string) ([]string, error) {
 	}()
 
 	filepath.Walk(root, buildDirs(dirChan))
+	for len(dirChan) > 0 {
+		time.Sleep(time.Millisecond * 100)
+	}
 	done <- true
 
 	log.Println(fmt.Sprintf("%v", dirs))
@@ -176,7 +201,7 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 		case event := <-eventIn:
 			log.Println("\tevent:", event)
 			if event.Op&fsnotify.Create == fsnotify.Create {
-				if isNewFile(event.Name) {
+				if util.IsNewFile(event.Name) {
 					continue
 				}
 				stat, err := os.Stat(event.Name)
@@ -189,9 +214,7 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 					log.Println("Need new watcher for ", event.Name)
 					adds <- event.Name
 				} else {
-					ext := strings.ToLower(path.Ext(event.Name))
-					log.Println("extension: ", ext)
-					if strings.Compare(ext, ".torrent") == 0 {
+					if util.IsTorrent(event.Name) {
 						log.Println("New file for consumption ", event.Name)
 						files <- event.Name
 					}
@@ -201,12 +224,6 @@ func handleEventsForChans(done chan bool, eventIn <-chan fsnotify.Event, adds ch
 			return
 		}
 	}
-}
-
-func isNewFile(name string) bool {
-	fileBaseName := strings.ToLower(filepath.Base(name))
-	log.Println(fileBaseName)
-	return strings.HasPrefix(fileBaseName, "new ")
 }
 
 func (w *SimpleWatcher) handleFilesFound() {
@@ -235,96 +252,95 @@ func (w *SimpleWatcher) consumeFileWithTimeout(file string, timeout time.Duratio
 	}
 }
 
-func (w *SimpleWatcher) watchForCompletion() {
+func (w *SimpleWatcher) WatchForCompletion() {
 	log.Println("Completion watcher starting up")
 	nonAlphaNum := regexp.MustCompile("[^a-zA-Z0-9]")
 	for {
-		time.Sleep(5 * time.Second)
-		completedFiles, err := ioutil.ReadDir(w.completedDir)
-		if err != nil {
-			log.Println("Unable to read completedDir: ", err)
-			continue
-		}
-		pendingRemoves := make([]string, 0)
-		for activeFile, fullPath := range w.ActiveFiles {
-			withoutExt := activeFile[0 : len(activeFile)-len(filepath.Ext(activeFile))]
-			fileTokens := nonAlphaNum.Split(strings.ToLower(withoutExt), -1)
-			log.Println("File Tokens (", len(fileTokens), ": ", fileTokens)
-			for _, compFile := range completedFiles {
-				matches := true
-				compTokens := nonAlphaNum.Split(strings.ToLower(compFile.Name()), -1)
-				log.Println("Compare Tokens: ", compTokens)
-				for _, fToken := range fileTokens {
-					if !util.StringSliceContains(compTokens, fToken) {
-						matches = false
+		select {
+		case <-w.CompleteWatcherDone:
+			return
+		default:
+			time.Sleep(5 * time.Second)
+			completedFiles, err := ioutil.ReadDir(w.completedDir)
+			if err != nil {
+				log.Println("Unable to read completedDir: ", err)
+				continue
+			}
+			pendingRemoves := make([]string, 0)
+			for activeFile, fullPath := range w.ActiveFiles {
+				withoutExt := activeFile[0 : len(activeFile)-len(filepath.Ext(activeFile))]
+				fileTokens := nonAlphaNum.Split(strings.ToLower(withoutExt), -1)
+				log.Println("File Tokens (", len(fileTokens), ": ", fileTokens)
+				for _, compFile := range completedFiles {
+					compTokens := nonAlphaNum.Split(strings.ToLower(compFile.Name()), -1)
+					log.Println("Compare Tokens: ", compTokens)
+					if util.DoTokensMatch(fileTokens, compTokens) {
+						log.Println("Found completed match for ", activeFile, ": ", compFile.Name())
+						pendingRemoves = append(pendingRemoves, activeFile)
+						w.DoneFiles <- Finalizer{orig: activeFile, origPath: fullPath, outFile: compFile.Name()}
 						break
 					}
 				}
-				if matches {
-					log.Println("Found completed match for ", activeFile, ": ", compFile.Name())
-					pendingRemoves = append(pendingRemoves, activeFile)
-					go w.finalizeFile(activeFile, fullPath, compFile.Name())
-					break
-				}
 			}
-		}
-		for _, remove := range pendingRemoves {
-			delete(w.ActiveFiles, remove)
+			for _, remove := range pendingRemoves {
+				delete(w.ActiveFiles, remove)
+			}
 		}
 	}
 }
 
-func (w *SimpleWatcher) finalizeFile(activeFile string, origin string, compFileName string) {
-	compFileWithPath := path.Join(w.completedDir, compFileName)
+func (w *SimpleWatcher) ProcessCompletions() {
+	for {
+		select {
+		case doneFile := <-w.DoneFiles:
+			compFileName := doneFile.outFile
+			compFileWithPath := path.Join(w.completedDir, doneFile.outFile)
 
-	// here we need to check if it's a directory and do things appropriately (if it's a dir, then we find the file we care about
-	stat, err := os.Stat(compFileWithPath)
-	if err != nil {
-		log.Println("Error stat'ing ", compFileWithPath, ": ", err)
-	}
-
-	finalRestingPlace := w.determineFinalLocation(origin)
-	log.Println("Ensure directory exists: ", finalRestingPlace)
-	err = os.MkdirAll(finalRestingPlace, os.ModePerm)
-	if err != nil {
-		log.Println("Failed to create parent directories for ", finalRestingPlace, ": ", err)
-		return
-	}
-
-	if stat.IsDir() {
-		if strings.Contains(strings.ToLower(origin), "tv") {
-			// move the whole folder?
-			log.Println("Completed file is TV")
-		} else if strings.Contains(strings.ToLower(origin), "movies") {
-			// move the largest file
-			log.Println("Completed file is Movies")
-			allFiles, err := ioutil.ReadDir(compFileWithPath)
+			// here we need to check if it's a directory and do things appropriately (if it's a dir, then we find the file we care about
+			stat, err := os.Stat(compFileWithPath)
 			if err != nil {
-				log.Println("Unable to read completed file directory ", compFileWithPath, ": ", err)
+				log.Println("Error stat'ing ", compFileWithPath, ": ", err)
 			}
-			var largestFile os.FileInfo
-			for _, fileInfo := range allFiles {
-				if largestFile == nil || fileInfo.Size() > largestFile.Size() {
-					largestFile = fileInfo
+
+			finalRestingPlace := util.DetermineFinalLocation(w.rootDir, w.mediaDir, doneFile.origPath)
+			log.Println("Ensure directory exists: ", finalRestingPlace)
+			err = os.MkdirAll(finalRestingPlace, os.ModePerm)
+			if err != nil {
+				log.Println("Failed to create parent directories for ", finalRestingPlace, ": ", err)
+				return
+			}
+
+			if stat.IsDir() {
+				if strings.Contains(strings.ToLower(doneFile.origPath), "tv") {
+					// move the whole folder?
+					log.Println("Completed file is TV")
+				} else if strings.Contains(strings.ToLower(doneFile.origPath), "movies") {
+					// move the largest file
+					log.Println("Completed file is Movies")
+					allFiles, err := ioutil.ReadDir(compFileWithPath)
+					if err != nil {
+						log.Println("Unable to read completed file directory ", compFileWithPath, ": ", err)
+					}
+					var largestFile os.FileInfo
+					for _, fileInfo := range allFiles {
+						if largestFile == nil || fileInfo.Size() > largestFile.Size() {
+							largestFile = fileInfo
+						}
+					}
+					originalFileName := path.Base(doneFile.origPath)
+					compFileName = util.RemoveExtension(originalFileName) + path.Ext(largestFile.Name())
+					log.Println("File to move: ", compFileName)
+					compFileWithPath = path.Join(compFileWithPath, largestFile.Name())
+				} else {
+					log.Println("Completed file of unknown category")
 				}
 			}
-			originalFileName := path.Base(origin)
-			compFileName = util.RemoveExtension(originalFileName) + path.Ext(largestFile.Name())
-			log.Println("File to move: ", compFileName)
-			compFileWithPath = path.Join(compFileWithPath, largestFile.Name())
-		} else {
-			log.Println("Completed file of unknown category")
+			err = util.MoveFileWithTimeout(compFileWithPath, path.Join(finalRestingPlace, compFileName), time.Minute*5)
+			if err != nil {
+				log.Println("Failed to move completed file: ", compFileName, ": ", err)
+			}
+		case <-w.FinalizerDone:
+			return
 		}
 	}
-	err = util.MoveFileWithTimeout(compFileWithPath, path.Join(finalRestingPlace, compFileName), time.Minute*5)
-	if err != nil {
-		log.Println("Failed to move completed file: ", compFileName, ": ", err)
-	}
-}
-
-func (w *SimpleWatcher) determineFinalLocation(origin string) string {
-	// take origin path, replace 'root' prefix with 'media' prefix
-	rootLength := len(w.rootDir)
-	baseLength := len(filepath.Base(origin))
-	return w.mediaDir + origin[rootLength:len(origin)-baseLength]
 }

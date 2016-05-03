@@ -2,6 +2,7 @@
 
 #test files
 watcher/test/
+util/test/
 
 #executable
 SuperScope*
