@@ -131,15 +131,48 @@ func TestDirectoryWatcher(t *testing.T) {
 
 		So(DetermineFinalLocation(origin, dest, file), ShouldEqual, expected)
 	})
+
+	Convey("Test existing files found", t, func() {
+		resetTestDir()
+
+		fileOneName := "test/complete/fileOne"
+		fileTwoName := "test/complete/fileTwo"
+		fileThreeName := "test/complete/fileThree"
+
+		file, err := os.Create(fileOneName)
+		So(err, ShouldBeNil)
+		file.Close()
+
+		file, err = os.Create(fileTwoName)
+		So(err, ShouldBeNil)
+		file.Close()
+
+		file, err = os.Create(fileThreeName)
+		So(err, ShouldBeNil)
+		file.Close()
+
+		foundFiles, err := GetExistingFiles("test/complete")
+		So(err, ShouldBeNil)
+
+		So(len(foundFiles), ShouldEqual, 3)
+		So(foundFiles, ShouldContain, "fileOne")
+		So(foundFiles, ShouldContain, "fileTwo")
+		So(foundFiles, ShouldContain, "fileThree")
+	})
 }
 
 func resetTestDir() {
 	os.RemoveAll("test")
 	os.Mkdir("test", os.ModePerm)
+
 	os.Mkdir("test/watch", os.ModePerm)
 	os.Mkdir("test/watch/tv", os.ModePerm)
 	os.Mkdir("test/watch/movies", os.ModePerm)
 	os.Mkdir("test/watch/music", os.ModePerm)
 
 	os.Mkdir("test/drop", os.ModePerm)
+
+	os.Mkdir("test/complete", os.ModePerm)
+
+	os.Mkdir("test/media", os.ModePerm)
 }

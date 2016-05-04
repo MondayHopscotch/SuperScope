@@ -1,6 +1,7 @@
 package util
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path"
@@ -65,4 +66,31 @@ func DetermineFinalLocation(origin string, dest string, file string) string {
 	originLength := len(origin)
 	baseLength := len(filepath.Base(file))
 	return dest + file[originLength:len(file)-baseLength]
+}
+
+func GetExistingFiles(rootPath string) ([]string, error) {
+
+	rootBase := filepath.Base(rootPath)
+
+	allFiles := make([]string, 0)
+
+	accumulator := func() filepath.WalkFunc {
+		return func(foundFilePath string, info os.FileInfo, err error) error {
+			if err != nil {
+				log.Print(err)
+				return err
+			}
+
+			foundBase := filepath.Base(foundFilePath)
+			if rootBase != foundBase {
+				allFiles = append(allFiles, foundBase)
+			}
+			return nil
+		}
+	}
+
+	err := filepath.Walk(rootPath, accumulator())
+	log.Println(fmt.Sprintf("%v", allFiles))
+
+	return allFiles, err
 }

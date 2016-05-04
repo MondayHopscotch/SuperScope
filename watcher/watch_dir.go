@@ -7,9 +7,11 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -27,6 +29,8 @@ type SimpleWatcher struct {
 	watcher      *fsnotify.Watcher
 	WatchedDirs  map[string]bool
 	ActiveFiles  map[string]string
+
+	IgnoreFiles []string
 
 	EventsDone          chan bool
 	WatcherDone         chan bool
@@ -69,6 +73,8 @@ func NewSimpleWatcher(root string, dropOff string, completed string, media strin
 
 		WatchedDirs: make(map[string]bool, 0),
 		ActiveFiles: make(map[string]string, 0),
+
+		IgnoreFiles: make([]string, 0),
 	}
 }
 
@@ -82,7 +88,7 @@ func (w *SimpleWatcher) Watch() {
 
 	w.watcher = newWatcher
 
-	log.Println("Scanning file system")
+	log.Println("Scanning watch directory")
 
 	startingDirs, err := determineStartDirs(w.rootDir)
 	if err != nil {
@@ -91,6 +97,20 @@ func (w *SimpleWatcher) Watch() {
 	}
 
 	log.Println("Finished scan. Adding directories to watcher")
+
+	existingFiles, err := util.GetExistingFiles(w.completedDir)
+	if err != nil {
+		log.Fatal("Unable to determine existing completed files: ", err)
+		return
+	}
+
+	log.Println("Adding files to ignore list: ", existingFiles)
+
+	w.IgnoreFiles = append(w.IgnoreFiles, existingFiles...)
+
+	log.Println("Scanning completed directory for pre-existing files")
+
+	log.Println("Finished scanning completed directory")
 
 	for _, dir := range startingDirs {
 		log.Println("Adding ", dir, " as root directory to watch")
@@ -272,12 +292,17 @@ func (w *SimpleWatcher) WatchForCompletion() {
 				fileTokens := nonAlphaNum.Split(strings.ToLower(withoutExt), -1)
 				log.Println("File Tokens (", len(fileTokens), ": ", fileTokens)
 				for _, compFile := range completedFiles {
+					if util.DoTokensMatch([]string{compFile.Name()}, w.IgnoreFiles) {
+						continue
+					}
 					compTokens := nonAlphaNum.Split(strings.ToLower(compFile.Name()), -1)
 					log.Println("Compare Tokens: ", compTokens)
 					if util.DoTokensMatch(fileTokens, compTokens) {
 						log.Println("Found completed match for ", activeFile, ": ", compFile.Name())
 						pendingRemoves = append(pendingRemoves, activeFile)
 						w.DoneFiles <- Finalizer{orig: activeFile, origPath: fullPath, outFile: compFile.Name()}
+						log.Println("Adding file to ignore list: ", compFile.Name())
+						w.IgnoreFiles = append(w.IgnoreFiles, compFile.Name())
 						break
 					}
 				}
@@ -335,9 +360,18 @@ func (w *SimpleWatcher) ProcessCompletions() {
 					log.Println("Completed file of unknown category")
 				}
 			}
-			err = util.MoveFileWithTimeout(compFileWithPath, path.Join(finalRestingPlace, compFileName), time.Minute*5)
-			if err != nil {
-				log.Println("Failed to move completed file: ", compFileName, ": ", err)
+
+			if runtime.GOOS == "windows" {
+				err = util.MoveFileWithTimeout(compFileWithPath, path.Join(finalRestingPlace, compFileName), time.Minute*5)
+				if err != nil {
+					log.Println("Failed to move completed file: ", compFileName, ": ", err)
+				}
+			} else {
+				lnCmd := exec.Command("ln", "-s", compFileWithPath, path.Join(finalRestingPlace, compFileName))
+				err = lnCmd.Run()
+				if err != nil {
+					log.Println("Failed to link completed file: ", compFileName, ": ", err)
+				}
 			}
 		case <-w.FinalizerDone:
 			return
